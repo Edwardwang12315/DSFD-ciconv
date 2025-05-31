@@ -32,17 +32,17 @@ parser = argparse.ArgumentParser(
     description='DSFD face Detector Training With Pytorch')
 train_set = parser.add_mutually_exclusive_group()
 parser.add_argument('--batch_size',
-                    default=8, type=int, # server上为8 我的电脑上2,仅训练ref时为16
+                    default=4, type=int, # server上为8 我的电脑上4
                     help='Batch size for training')
 parser.add_argument('--model',
-                    default='dark', type=str,
-                    choices=['dark', 'vgg', 'resnet50', 'resnet101', 'resnet152'],
+                    default='ciconv', type=str,
+                    choices=['ciconv','dark', 'vgg', 'resnet50', 'resnet101', 'resnet152'],
                     help='model for training')
 parser.add_argument('--resume',
                     default=None, type=str, # '../model/forDAINet/dark/dsfd.pth'
                     help='Checkpoint state_dict file to resume training from')
 parser.add_argument('--num_workers',
-                    default=20, type=int,
+                    default=4, type=int, # server上为20 我的电脑上为4
                     help='Number of workers used in dataloading')
 parser.add_argument('--cuda',
                     default=True, type=bool,
@@ -63,7 +63,7 @@ parser.add_argument('--multigpu',
                     default=True, type=bool,
                     help='Use mutil Gpu training')
 parser.add_argument('--save_folder',
-                    default='../model/forDAINet/',
+                    default='../../model/forDAINet/',
                     help='Directory for saving checkpoint models')
 parser.add_argument('--local_rank',
                     type=int,
@@ -110,7 +110,7 @@ train_loader = data.DataLoader(train_dataset, args.batch_size,
 val_batchsize = args.batch_size
 val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, shuffle=True)
 val_loader = data.DataLoader(val_dataset, val_batchsize,
-                             num_workers=0,
+                             num_workers=args.num_workers,
                              collate_fn=detection_collate,
                              sampler=val_sampler,
                              pin_memory=True)
@@ -129,9 +129,7 @@ def train():
     basenet = basenet_factory(args.model)
     dsfd_net = build_net('train', cfg.NUM_CLASSES, args.model)
     net = dsfd_net
-    # net_enh = RetinexNet()
-    # net_enh.load_state_dict(torch.load(args.save_folder + 'decomp.pth'))
-
+    
     # 中断恢复
     if args.resume:
         if local_rank == 0:
@@ -142,12 +140,14 @@ def train():
         base_weights = torch.load(args.save_folder + basenet)
         if local_rank == 0:
             print('Load base network {}'.format(args.save_folder + basenet))
-        if args.model == 'vgg' or args.model == 'dark':
+        # 为backbone加载预训练权重
+        if args.model == 'vgg' or args.model == 'dark' or args.model == 'ciconv':
             print(f'load weights {args.model}')
             net.vgg.load_state_dict(base_weights)
         else:
             net.resnet.load_state_dict(base_weights)
-    if not args.resume:
+
+        # 初始化其他网络参数
         if local_rank == 0:
             print('Initializing weights...')
         if True :
@@ -159,12 +159,8 @@ def train():
             net.conf_pal1.apply(net.weights_init)
             net.loc_pal2.apply(net.weights_init)
             net.conf_pal2.apply(net.weights_init)
-        net.ref.apply(net.weights_init)
-        net.ciconv2d_l.apply(net.weights_init)
-        net.ciconv2d_d.apply(net.weights_init)
-
-    if True:
-        LoadLocalW(net,'../model/forDAINet/dark/dsfd.pth')
+        net.ciconv2d.apply(net.weights_init)
+        net.coder.apply(net.weights_init)
 
     # Scaling the lr
     # 设置了根据批次大小和gpu数量调整学习率的机制
@@ -180,9 +176,8 @@ def train():
         param_group += [{'params': dsfd_net.conf_pal1.parameters(), 'lr': lr}]
         param_group += [{'params': dsfd_net.loc_pal2.parameters(), 'lr': lr}]
         param_group += [{'params': dsfd_net.conf_pal2.parameters(), 'lr': lr}]
-    param_group += [{'params': dsfd_net.ref.parameters(), 'lr': lr / 10.}]
-    param_group += [{'params': dsfd_net.ciconv2d_l.parameters(), 'lr': lr / 10.}]
-    param_group += [{'params': dsfd_net.ciconv2d_d.parameters(), 'lr': lr / 10.}]
+    param_group += [{'params': dsfd_net.ciconv2d.parameters(), 'lr': lr / 10.}]
+    param_group += [{'params': dsfd_net.coder.parameters(), 'lr': lr}]
 
     optimizer = optim.SGD(param_group, lr=lr, momentum=args.momentum,
                           weight_decay=args.weight_decay)
@@ -191,8 +186,6 @@ def train():
         if args.multigpu:
             # 采用数据并行模型，多gpu
             net = torch.nn.parallel.DistributedDataParallel(net.cuda(), find_unused_parameters=True)
-            # net_enh = torch.nn.parallel.DistributedDataParallel(net_enh.cuda())
-        # net = net.cuda()
         cudnn.benckmark = True
 
     criterion = MultiBoxLoss(cfg, args.cuda)
@@ -206,43 +199,26 @@ def train():
         if iteration > step:
             step_index += 1
             adjust_learning_rate(optimizer, args.gamma, step_index)
+
     net.train()
-    corr_mat = None
     for epoch in range(start_epoch, cfg.EPOCHES):
         losses = 0
         loss_l1 = 0
         loss_c1 = 0
         loss_l2 = 0
         loss_c2 = 0
-        loss_ft = 0
-        loss_rf = 0
-        loss_co = 0
-        loss_cic =0
 
         for batch_idx, (images, targets, _) in enumerate(train_loader):
-            # print( len( train_loader ) )
-            # exit()
-            # print( f"#batch {batch_idx} is working" )
-            # print( "Before net:" )
-            # print( f"Allocated: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB" )
-            # print( f"Cached:    {torch.cuda.memory_reserved() / 1024 ** 2:.2f} MB" )
-
             images = Variable(images.cuda() / 255.)
             targetss = [Variable(ann.cuda(), requires_grad=False)
                         for ann in targets]
-            img_dark = torch.empty(size=(images.shape[0], images.shape[1], images.shape[2], images.shape[3])).cuda()
+            
             # Generation of degraded data and AET groundtruth
-            for i in range(images.shape[0]):
-                img_dark[i], _ = Low_Illumination_Degrading(images[i])#ISP方法生成低照度图像
-
-            # print( '暗化' )
-            # image = np.transpose( img_dark[ 0 ].detach().cpu().numpy() , (1 , 2 , 0) )  # 调整维度顺序 [C, H, W] → [H, W, C]
-            # image = (image * 255).astype( np.uint8 )
-            # plt.imshow( image )
-            # plt.axis( 'off' )
-            # # exit()
-            # # 保存图像到文件
-            # plt.savefig( f'ISP_暗图.png' , bbox_inches = 'tight' , pad_inches = 0 , dpi = 800 )
+            # 出于ciconv方法考虑，作为ZSDA方法这里不需要生成低照度图像
+            # 如果后续对比全监督性能，可以开启
+            # img_dark = torch.empty(size=(images.shape[0], images.shape[1], images.shape[2], images.shape[3])).cuda()
+            # for i in range(images.shape[0]):
+            #     img_dark[i], _ = Low_Illumination_Degrading(images[i]) # ISP方法生成低照度图像
 
             if iteration in cfg.LR_STEPS:
                 step_index += 1
@@ -251,11 +227,7 @@ def train():
             # 前向传播两个分支
             t0 = time.time()
 
-            out, out2, losses_feat = net(img_dark, images)
-            R_dark, R_light, R_dark_2, R_light_2 = out2
-            # print( "After net:" )
-            # print( f"Allocated: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB" )
-            # print( f"Cached:    {torch.cuda.memory_reserved() / 1024 ** 2:.2f} MB" )
+            out, detail = net(images)
 
             # backprop
             optimizer.zero_grad()
@@ -264,34 +236,8 @@ def train():
                 loss_l_pa1l, loss_c_pal1 = criterion(out[:3], targetss)
                 loss_l_pa12, loss_c_pal2 = criterion(out[3:], targetss)
 
-            # 一致性损失
-            # print(f'三通道一致性损失为{F.mse_loss(R_dark, R_light.detach())}，单通道一致性损失为{F.mse_loss(R_dark_2, R_light_2.detach())}')
-            # exit()
-
-            """ 认为ciconv得到的是伪真值,只学习边缘纹理信息 """
-            loss_decoder,loss_ciconv,loss_dark,loss_light = criterion_enhance(out2)
-
-            # print(f'loss_decoder = {loss_decoder},loss_ciconv = {loss_ciconv},loss_dark = {loss_dark},loss_light = {loss_light}')
-            losses_ref = (loss_decoder + loss_ciconv + loss_dark + loss_light)/4
-
-            """ 以下损失希望两幅图色彩与边缘都一致 """
-            # detach的目的是保证亮图的输出不会被干扰
-            losses_cons = (F.mse_loss(R_dark, R_light.detach()) * cfg.WEIGHT.EQUAL_R) # 只保留了特征提取部分的一致性损失
-            
-            # # 分别将解码图和分解图对比，促进解码器学习
-            # losses_ref = F.l1_loss(R_dark, R_dark_2.detach()) + F.l1_loss(R_light, R_light_2.detach()) + (
-            #             1. - ssim(R_dark, R_dark_2.detach())) + (1. - ssim(R_light, R_light_2.detach()))
-
-            # 同时ciconv也应该学习如何对亮度不同的图像进行提取边缘
-            # losses_cic = F.l1_loss(R_dark_2, R_light_2) + (1. - ssim(R_dark_2, R_light_2))
-            losses_cic = (F.l1_loss(R_dark_2, R_light_2.detach()) + (1. - ssim(R_dark_2, R_light_2.detach())) \
-                        #   + F.l1_loss(R_dark_2.detach(), R_light_2) + (1. - ssim(R_dark_2.detach(), R_light_2))
-                          ) * cfg.WEIGHT.DCOM
-
             if True :
-                loss = loss_l_pa1l + loss_c_pal1 + loss_l_pa12 + loss_c_pal2 + losses_ref + losses_cons + losses_feat + losses_cic
-            else:
-                loss = losses_ref + losses_cons + losses_feat + losses_cic
+                loss = loss_l_pa1l + loss_c_pal1 + loss_l_pa12 + loss_c_pal2 
             
             # 反向传播
             loss.backward()
@@ -304,10 +250,6 @@ def train():
                 loss_c1 += loss_c_pal1.item()
                 loss_l2 += loss_l_pa12.item()
                 loss_c2 += loss_c_pal2.item()
-            loss_ft += losses_feat.item()
-            loss_rf += losses_ref.item()
-            loss_co += losses_cons.item()
-            loss_cic += losses_cic.item()
             
             if iteration % 100 == 0:
                 tloss = losses / (batch_idx + 1)
@@ -316,10 +258,6 @@ def train():
                     tloss_c1 = loss_c1 / (batch_idx + 1)
                     tloss_l2 = loss_l2 / (batch_idx + 1)
                     tloss_c2 = loss_c2 / (batch_idx + 1)
-                tloss_ft = loss_ft / (batch_idx + 1)
-                tloss_rf = loss_rf / (batch_idx + 1)
-                tloss_co = loss_co / (batch_idx + 1)
-                tloss_cic = loss_cic / (batch_idx + 1)
                 
                 if local_rank == 0:
                     print( 'Timer: %.4f' % (t1 - t0) )
@@ -327,7 +265,6 @@ def train():
                     if True :
                         print( '->> pal1 conf loss:{:.4f} || pal1 loc loss:{:.4f}'.format( tloss_c1 , tloss_l1 ) )
                         print( '->> pal2 conf loss:{:.4f} || pal2 loc loss:{:.4f}'.format( tloss_c2 , tloss_l2 ) )
-                    print( '->> feature loss:{:.4f} || contrast loss:{:.4f} || lowlevel loss:{:.4f} || cic_decom loss:{:.4f}'.format( tloss_ft , tloss_rf, tloss_co,tloss_cic) )
                     print( '->>lr:{}'.format( optimizer.param_groups[ 0 ][ 'lr' ] ) )
                     # val(epoch, net, dsfd_net, criterion)
         
@@ -369,9 +306,11 @@ def val(epoch, net, dsfd_net,  criterion):
             images = Variable(images / 255.)
             with torch.no_grad() :
                 targets = [ann for ann in targets]
+        
+        # ZSDA训练时用正常亮度训练，退化图像用于测试
         img_dark = torch.stack([Low_Illumination_Degrading(images[i])[0] for i in range(images.shape[0])],
                                dim=0)
-        out, R = net.module.test_forward(img_dark)
+        out, detail = net.module.test_forward(img_dark)
 
         loss_l_pa1l, loss_c_pal1 = criterion(out[:3], targets)
         loss_l_pa12, loss_c_pal2 = criterion(out[3:], targets)
