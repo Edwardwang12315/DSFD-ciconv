@@ -32,17 +32,17 @@ parser = argparse.ArgumentParser(
     description='DSFD face Detector Training With Pytorch')
 train_set = parser.add_mutually_exclusive_group()
 parser.add_argument('--batch_size',
-                    default=2, type=int, # server上为8 我的电脑上2
+                    default=8, type=int, # server上为8 我的电脑上2
                     help='Batch size for training')
 parser.add_argument('--model',
                     default='ciconv', type=str,
                     choices=['ciconv','dark', 'vgg', 'resnet50', 'resnet101', 'resnet152'],
                     help='model for training')
 parser.add_argument('--resume',
-                    default=None, type=str, # '../model/forDAINet/dark/dsfd.pth'
+                    default='../../model/forDAINet/ciconv/dsfd.pth', type=str, # '../../model/forDAINet/ciconv/dsfd.pth'
                     help='Checkpoint state_dict file to resume training from')
 parser.add_argument('--num_workers',
-                    default=4, type=int, # server上为20 我的电脑上为4
+                    default=20, type=int, # server上为20 我的电脑上为4
                     help='Number of workers used in dataloading')
 parser.add_argument('--cuda',
                     default=True, type=bool,
@@ -135,7 +135,7 @@ def train():
         if local_rank == 0:
             print('Resuming training, loading {}...'.format(args.resume))
         start_epoch = net.load_weights(args.resume)
-        iteration = start_epoch * per_epoch_size # 20700
+        iteration = start_epoch * per_epoch_size # 40200
     else:
         base_weights = torch.load(args.save_folder + basenet)
         if local_rank == 0:

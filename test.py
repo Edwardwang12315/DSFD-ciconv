@@ -218,9 +218,9 @@ def bbox_vote(det_):
 
 def load_models():
     print('build network')
-    net = build_net('test', num_classes=2, model='dark')
+    net = build_net('test', num_classes=2, model='ciconv')
     net.eval()
-    net.load_state_dict(torch.load('../model/forDAINet/dark/dsfd.pth')) # Set the dir of your model weight
+    net.load_state_dict(torch.load('../../model/forDAINet/ciconv/dsfd.pth')) # Set the dir of your model weight
 
     if use_cuda:
         net = net.cuda()
@@ -386,7 +386,7 @@ if __name__ == '__main__':
     save_path = './result'
 
     def load_images():
-      imglist = glob.glob('../dataset/DarkFace/image/*.png') # Set the dir of your test data
+      imglist = glob.glob('../../dataset/DarkFace/image/*.png') # Set the dir of your test data
       return imglist
 
     ''' Main Test '''
@@ -434,22 +434,21 @@ if __name__ == '__main__':
         now += 1
         print('Processing: {}/{}'.format(now + 1, img_list.__len__()))
 
-        # 在代码中调用绘制函数
-        image = Image.open( img_path )
-        if image.mode == 'L' :
-            image = image.convert( 'RGB' )
-        image = np.array( image )
-
-        # 假设 dets 是检测到的框
-        img_save=os.path.join(save_path,"images",Path(os.path.basename(img_path)).stem + '.png')
-        draw_boxes_with_matplotlib( image , dets,img_save)
+        # # 在代码中调用绘制函数
+        # image = Image.open( img_path )
+        # if image.mode == 'L' :
+        #     image = image.convert( 'RGB' )
+        # image = np.array( image )
+        # # 假设 dets 是检测到的框
+        # img_save=os.path.join(save_path,"images",Path(os.path.basename(img_path)).stem + '.png')
+        # draw_boxes_with_matplotlib( image , dets,img_save)
     
-    # 统计mAP
-    ground_truth_path = '../dataset/DarkFace/label'  # 修改为你的真实标签路径
-    detection_path = os.path.join(save_path, 'annotations')
-    if os.path.exists(ground_truth_path):
-        ap = compute_mAP(detection_path, ground_truth_path)
-        print(f'mAP at IoU 0.5: {ap:.4f}')
-    else:
-        print('真实标签路径不存在，跳过mAP计算')
+    # # 统计mAP
+    # ground_truth_path = '../../dataset/DarkFace/label'  # 修改为你的真实标签路径
+    # detection_path = os.path.join(save_path, 'annotations')
+    # if os.path.exists(ground_truth_path):
+    #     ap = compute_mAP(detection_path, ground_truth_path)
+    #     print(f'mAP at IoU 0.5: {ap:.4f}')
+    # else:
+    #     print('真实标签路径不存在，跳过mAP计算')
 
